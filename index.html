@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>벌레 잡기 - 동작 인식 게임</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Jua&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0f1d24; --panel:#16272f; --line:#274250; --text:#eef3ee; --muted:#93a8b0;
+    --mustard:#f2c14e; --red:#e4572e; --green:#7bd88f;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--text);font-family:'Jua','Apple SD Gothic Neo','Malgun Gothic',sans-serif}
+  body{min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:12px}
+  h1{font-size:1.4rem;margin:4px 0 10px;font-weight:400;letter-spacing:.02em}
+  .hud{display:flex;gap:10px;width:100%;max-width:860px;margin-bottom:10px}
+  .hud div{flex:1;background:var(--panel);border:2px solid var(--line);border-radius:12px;padding:6px 10px;text-align:center}
+  .hud small{display:block;color:var(--muted);font-size:.8rem}
+  .hud b{font-size:1.4rem;font-weight:400}
+  .stage{position:relative;width:100%;max-width:860px;aspect-ratio:800/520;border:3px solid var(--line);border-radius:16px;overflow:hidden;background:#1b3340}
+  canvas#game{width:100%;height:100%;display:block}
+  .pip{position:absolute;z-index:5;right:10px;bottom:10px;width:190px;background:rgba(15,29,36,.85);border:2px solid var(--line);border-radius:10px;padding:4px}
+  .pip canvas{width:100%;display:block;border-radius:6px}
+  #gesture{font-size:.95rem;text-align:center;padding-top:3px;color:var(--muted)}
+  #gesture.on{color:var(--mustard)}
+  .bar{position:relative;height:18px;margin-top:4px;background:#0f1d24;border-radius:6px;overflow:hidden;font-size:.8rem;line-height:18px}
+  .bar i{position:absolute;left:0;top:0;bottom:0;width:0;background:#2f6b52}
+  .bar span{position:relative;padding-left:6px}
+  #status{color:var(--mustard);min-height:1.5em}
+  .overlay{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;background:rgba(10,20,26,.9);text-align:center;padding:20px}
+  .overlay.hidden{display:none}
+  .overlay h2{font-size:2rem;margin:0;font-weight:400}
+  .overlay p{margin:0;color:var(--muted);line-height:1.6;max-width:30em}
+  .overlay .legend{font-size:1.15rem;color:var(--text)}
+  button{font-family:inherit;font-size:1.2rem;background:var(--mustard);color:#241a00;border:0;border-radius:12px;padding:10px 28px;cursor:pointer}
+  button:focus-visible{outline:3px solid #fff;outline-offset:3px}
+  button:disabled{opacity:.5;cursor:wait}
+  #banner{position:absolute;left:0;right:0;top:18%;text-align:center;font-size:2.6rem;color:var(--mustard);pointer-events:none;opacity:0;transition:opacity .25s}
+  #banner.show{opacity:1}
+  @media (max-width:560px){.pip{width:110px}.hud b{font-size:1.1rem}}
+  @media (prefers-reduced-motion:reduce){#banner{transition:none}}
+</style>
+</head>
+<body>
+<h1>벌레 잡기</h1>
+
+<div class="hud" aria-live="polite">
+  <div><small>점수</small><b id="score">0</b></div>
+  <div><small>레벨</small><b id="level">1</b></div>
+  <div><small>콤보</small><b id="combo">0</b></div>
+  <div><small>목숨</small><b id="lives">❤❤❤❤❤</b></div>
+</div>
+
+<div class="stage">
+  <canvas id="game" width="800" height="520"></canvas>
+  <div id="banner"></div>
+  <div class="pip">
+    <canvas id="pip" width="320" height="240"></canvas>
+    <div id="gesture">카메라 대기 중</div>
+    <div id="bars"></div>
+  </div>
+
+  <div class="overlay" id="startScreen">
+    <h2>🪰 박수 · 🪳 주먹</h2>
+    <p class="legend">🪰 파리는 <b>박수</b>로, 🪳 바퀴벌레는 <b>주먹</b>으로 잡으세요.</p>
+    <p>벌레가 가운데 원 안에 들어왔을 때 해당 동작을 하면 잡힙니다. 놓치면 목숨이 줄고, 라운드(벌레 10마리)가 끝날 때마다 레벨이 올라 더 빨라져요. 카메라에 상체가 보이도록 서 주세요.</p>
+    <button id="startBtn">게임 시작</button>
+    <p id="status"></p>
+  </div>
+
+  <div class="overlay hidden" id="endScreen">
+    <h2>게임 끝</h2>
+    <p id="endText"></p>
+    <button id="retryBtn">다시 하기</button>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@1.3.1/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@teachablemachine/pose@0.8/dist/teachablemachine-pose.min.js"></script>
+<script>
+/* ===================== 설정 ===================== */
+const MODEL_URL = './model.json';
+const META_URL  = './metadata.json';
+const THRESHOLD = 0.85;   // 이 확률 이상이어야 동작으로 인정
+const STABLE_N  = 2;      // 연속 몇 프레임 유지해야 인정
+const BUGS_PER_ROUND = 10;
+const START_LIVES = 5;
+
+const W = 800, H = 520, CX = W/2, CY = H/2, ZONE = 90;
+
+// 레벨별 난이도: 간격(리듬)과 이동시간이 줄어든다
+const spawnInterval = lv => Math.max(550,  1900 * Math.pow(0.88, lv-1));
+const travelTime    = lv => Math.max(1300, 3200 * Math.pow(0.90, lv-1));
+
+/* ===================== 상태 ===================== */
+const $ = id => document.getElementById(id);
+const canvas = $('game'), ctx = canvas.getContext('2d');
+const pip = $('pip'), pctx = pip.getContext('2d');
+
+let model, webcam, labels = [], need = {};
+let poseRunning = false;
+const cur = { label:null, prob:0, stable:0 };
+
+let S; // 게임 상태
+function newState(){
+  return { score:0, level:1, combo:0, lives:START_LIVES, bugs:[], fx:[],
+           spawned:0, nextSpawn:0, phase:'play', phaseUntil:0, cooldown:0 };
+}
+
+/* ===================== 소리 ===================== */
+let actx;
+function beep(freq, dur=.12, type='sine', vol=.15){
+  try{
+    actx = actx || new (window.AudioContext||window.webkitAudioContext)();
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.type=type; o.frequency.value=freq; g.gain.value=vol;
+    o.connect(g); g.connect(actx.destination);
+    g.gain.exponentialRampToValueAtTime(.001, actx.currentTime+dur);
+    o.start(); o.stop(actx.currentTime+dur);
+  }catch(e){}
+}
+
+/* ===================== 모델 / 웹캠 ===================== */
+function setStatus(t, isErr){
+  const el = $('status'); el.textContent = t; el.style.color = isErr ? '#e4572e' : '';
+  console.log('[status]', t);
+}
+const withTimeout = (p, ms, name) => Promise.race([
+  p, new Promise((_, rej) => setTimeout(() => rej(new Error(name + ' 시간 초과 (' + ms/1000 + '초)')), ms))
+]);
+
+let previewOn = false;
+function previewLoop(){            // 모델 로딩 중에도 카메라가 보이도록
+  if(!previewOn) return;
+  webcam.update(); pctx.drawImage(webcam.canvas, 0, 0);
+  requestAnimationFrame(previewLoop);
+}
+
+async function init(){
+  $('startBtn').disabled = true;
+  try{
+    if(location.protocol === 'file:')
+      throw new Error('파일을 직접 열면 동작하지 않습니다. GitHub Pages 주소(https) 또는 localhost로 여세요.');
+    if(typeof tf === 'undefined' || typeof tmPose === 'undefined')
+      throw new Error('tfjs / teachablemachine-pose 라이브러리를 불러오지 못했습니다. 인터넷 연결이나 광고 차단 확장을 확인하세요.');
+    if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia)
+      throw new Error('이 브라우저/주소에서는 카메라를 쓸 수 없습니다. https 주소인지 확인하세요.');
+
+    if(!webcam){
+      setStatus('1/3 카메라 켜는 중… 브라우저의 카메라 권한을 "허용"해 주세요.');
+      webcam = new tmPose.Webcam(320, 240, true);
+      await withTimeout(webcam.setup(), 60000, '카메라 연결');
+      await webcam.play();
+      previewOn = true; previewLoop();
+    }
+
+    if(!model){
+      setStatus('2/3 모델 불러오는 중… (model.json, metadata.json, weights.bin)');
+      model = await withTimeout(tmPose.load(MODEL_URL, META_URL), 60000, '모델 로딩');
+      labels = model.getClassLabels();
+      need.fly   = labels.find(l => l.includes('박수')) ?? labels[0];
+      need.roach = labels.find(l => l.includes('주먹')) ?? labels[1];
+      $('bars').innerHTML = labels.map((l,i) =>
+        `<div class="bar"><i id="bi${i}"></i><span>${l}</span></div>`).join('');
+    }
+
+    setStatus('3/3 인식 시작!');
+    previewOn = false;
+    $('startScreen').classList.add('hidden');
+    startGame();
+    if(!poseRunning){ poseRunning = true; poseLoop(); }
+  }catch(err){
+    console.error(err);
+    previewOn = false;
+    setStatus('오류: ' + (err && err.message ? err.message : err) +
+              ' (F12 → Console에서 자세한 내용을 볼 수 있어요)', true);
+    $('startBtn').disabled = false;
+    $('startBtn').textContent = '다시 시도';
+  }
+}
+
+async function poseLoop(){
+  try{
+    while(poseRunning){
+      webcam.update();
+      const { pose, posenetOutput } = await model.estimatePose(webcam.canvas);
+      const pred = await model.predict(posenetOutput);
+
+      pctx.drawImage(webcam.canvas, 0, 0);
+      if(pose){
+        tmPose.drawKeypoints(pose.keypoints, 0.5, pctx);
+        tmPose.drawSkeleton(pose.keypoints, 0.5, pctx);
+      }
+
+      let top = pred[0];
+      pred.forEach((p, i) => {
+        if(p.probability > top.probability) top = p;
+        const bar = $('bi' + i);
+        if(bar) bar.style.width = Math.round(p.probability * 100) + '%';
+      });
+
+      if(top.probability >= THRESHOLD){
+        if(cur.label === top.className) cur.stable++;
+        else { cur.label = top.className; cur.stable = 1; }
+        cur.prob = top.probability;
+      }else{
+        cur.label = null; cur.stable = 0; cur.prob = top.probability;
+      }
+      const g = $('gesture');
+      if(!pose){ g.textContent = '사람이 안 보여요'; g.className = ''; }
+      else if(cur.label && cur.stable >= STABLE_N){
+        g.textContent = `${cur.label} ${Math.round(cur.prob*100)}%`; g.className = 'on';
+      }else{ g.textContent = '인식 대기'; g.className = ''; }
+      await tf.nextFrame();
+    }
+  }catch(err){
+    console.error(err);
+    poseRunning = false;
+    $('gesture').textContent = '인식 오류: ' + (err.message || err);
+    $('gesture').style.color = '#e4572e';
+  }
+}
+const gestureNow = () => (cur.label && cur.stable >= STABLE_N) ? cur.label : null;
+
+/* ===================== 게임 로직 ===================== */
+function startGame(){
+  S = newState();
+  S.nextSpawn = performance.now() + 1200;
+  $('endScreen').classList.add('hidden');
+  updateHud();
+  requestAnimationFrame(frame);
+}
+
+function spawnBug(now){
+  const type = Math.random() < .5 ? 'fly' : 'roach';
+  const side = Math.floor(Math.random()*4);
+  const m = 40;
+  const pos = [
+    [-m, Math.random()*H],        // 왼쪽
+    [W+m, Math.random()*H],       // 오른쪽
+    [Math.random()*W, -m],        // 위
+    [Math.random()*W, H+m]        // 아래
+  ][side];
+  S.bugs.push({ type, x0:pos[0], y0:pos[1], x:pos[0], y:pos[1], born:now,
+                travel:travelTime(S.level), state:'in', t:0, wob:Math.random()*6 });
+  S.spawned++;
+}
+
+function addFx(x, y, text, color){ S.fx.push({x, y, text, color, t:performance.now()}); }
+
+function showBanner(text, ms){
+  const b = $('banner'); b.textContent = text; b.classList.add('show');
+  setTimeout(()=>b.classList.remove('show'), ms);
+}
+
+function updateHud(){
+  $('score').textContent = S.score;
+  $('level').textContent = S.level;
+  $('combo').textContent = S.combo;
+  $('lives').textContent = '❤'.repeat(Math.max(0,S.lives)) + '♡'.repeat(Math.max(0,START_LIVES-S.lives));
+}
+
+function update(now){
+  if(S.phase === 'over') return;
+
+  if(S.phase === 'levelup'){
+    if(now >= S.phaseUntil){ S.phase = 'play'; S.nextSpawn = now + 600; }
+    return;
+  }
+
+  // 일정한 리듬으로 생성
+  if(S.spawned < BUGS_PER_ROUND && now >= S.nextSpawn){
+    spawnBug(now);
+    S.nextSpawn = now + spawnInterval(S.level);
+  }
+
+  const g = gestureNow();
+  // 가운데에 가장 가까이 온 벌레 우선
+  let target = null;
+  for(const b of S.bugs){
+    if(b.state !== 'in') continue;
+    const p = (now - b.born) / b.travel;
+    b.x = b.x0 + (CX - b.x0) * Math.min(p,1);
+    b.y = b.y0 + (CY - b.y0) * Math.min(p,1);
+    const d = Math.hypot(b.x-CX, b.y-CY);
+    if(d <= ZONE && (!target || p > target.p)) target = { b, p };
+    if(p >= 1){                       // 놓침
+      b.state = 'missed'; b.t = now;
+      S.lives--; S.combo = 0;
+      addFx(CX, CY-40, '놓쳤다!', '#e4572e'); beep(140, .3, 'sawtooth');
+      updateHud();
+    }
+  }
+
+  // 판정: 구역 안 벌레 종류와 동작이 일치하면 잡기
+  if(target && g && now >= S.cooldown && g === need[target.b.type]){
+    const b = target.b;
+    b.state = 'caught'; b.t = now;
+    S.combo++;
+    const gain = 100 + Math.min(S.combo-1, 10) * 20;
+    S.score += gain;
+    S.cooldown = now + 250;
+    addFx(b.x, b.y-30, `+${gain}`, '#f2c14e'); beep(b.type==='fly'?880:520, .12, 'triangle');
+    updateHud();
+  }
+
+  S.bugs = S.bugs.filter(b => b.state === 'in' || now - b.t < 450);
+
+  if(S.lives <= 0){
+    S.phase = 'over';
+    $('endText').textContent = `점수 ${S.score}점 · 레벨 ${S.level} 도달`;
+    $('endScreen').classList.remove('hidden');
+    return;
+  }
+
+  // 라운드 종료 → 레벨업
+  if(S.spawned >= BUGS_PER_ROUND && S.bugs.length === 0){
+    S.level++; S.spawned = 0; S.phase = 'levelup'; S.phaseUntil = now + 1800;
+    S.score += 200; updateHud();
+    showBanner(`레벨 ${S.level}! 더 빨라집니다`, 1500);
+    beep(660,.15,'square',.1); setTimeout(()=>beep(990,.2,'square',.1),150);
+  }
+}
+
+/* ===================== 그리기 ===================== */
+function drawBackground(){
+  // 부엌 타일 바닥
+  const t = 52;
+  for(let y=0; y<H; y+=t) for(let x=0; x<W; x+=t){
+    ctx.fillStyle = ((x/t + y/t) % 2) ? '#1b3340' : '#193039';
+    ctx.fillRect(x, y, t, t);
+  }
+}
+
+function drawTarget(now, hasBug, need_g){
+  ctx.save();
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = hasBug ? '#f2c14e' : 'rgba(238,243,238,.45)';
+  ctx.setLineDash([14, 10]);
+  ctx.beginPath(); ctx.arc(CX, CY, ZONE, 0, Math.PI*2); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.strokeStyle = 'rgba(238,243,238,.25)';
+  ctx.beginPath(); ctx.arc(CX, CY, 8, 0, Math.PI*2); ctx.stroke();
+  if(need_g){
+    ctx.fillStyle = '#f2c14e'; ctx.font = '22px Jua, sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText(need_g + '!', CX, CY + ZONE + 30);
+  }
+  ctx.restore();
+}
+
+function drawBugs(now){
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  for(const b of S.bugs){
+    const emoji = b.type === 'fly' ? '🪰' : '🪳';
+    let alpha = 1, scale = 1, dx = 0, dy = 0;
+    if(b.state === 'in'){
+      const w = Math.sin((now - b.born)/90 + b.wob) * 3;   // 파닥거림
+      dx = w; dy = -w;
+    }else{
+      const k = Math.min((now - b.t)/450, 1);
+      alpha = 1 - k; scale = b.state === 'caught' ? 1 + k*.6 : 1 - k*.4;
+    }
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.translate(b.x + dx, b.y + dy);
+    ctx.scale(scale, scale);
+    ctx.font = '64px sans-serif';
+    ctx.fillText(emoji, 0, 0);
+    ctx.restore();
+  }
+}
+
+function drawFx(now){
+  ctx.textAlign = 'center'; ctx.font = '30px Jua, sans-serif';
+  S.fx = S.fx.filter(f => now - f.t < 800);
+  for(const f of S.fx){
+    const k = (now - f.t)/800;
+    ctx.globalAlpha = 1 - k; ctx.fillStyle = f.color;
+    ctx.fillText(f.text, f.x, f.y - k*40);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function frame(now){
+  if(!S) return;
+  update(now);
+  drawBackground();
+
+  // 구역 안에 벌레가 있는지, 어떤 동작이 필요한지 표시
+  let inZone = null;
+  for(const b of S.bugs) if(b.state==='in' && Math.hypot(b.x-CX,b.y-CY) <= ZONE) inZone = b;
+  drawTarget(now, !!inZone, inZone ? need[inZone.type] : null);
+  drawBugs(now);
+  drawFx(now);
+
+  if(S.phase !== 'over') requestAnimationFrame(frame);
+}
+
+/* ===================== 이벤트 ===================== */
+$('startBtn').addEventListener('click', init);
+$('retryBtn').addEventListener('click', startGame);
+</script>
+</body>
+</html>
